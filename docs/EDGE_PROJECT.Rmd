@@ -1,0 +1,367 @@
+---
+title: "Edge_Project_Modeling"
+author: "EDGE TEAM"
+date: "2023-11-26"
+output: html_document
+---
+
+```{r}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(caret)
+library(tidytext)
+library(wordcloud)
+library(caTools)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(topicmodels)
+library(xgboost)
+library(RColorBrewer)
+library(tm)
+library(scales)
+library(pROC)
+```
+
+## Preprocessing
+
+```{r pressure, echo=FALSE}
+master_data <- read.csv("final.table.csv")
+master_data <- na.omit(master_data)
+```
+
+```{r}
+predictive_df <- master_data %>% select(-c("track_artist", "track_name","lyrics", "language"))
+predictive_df$dominant_topic <- as.factor(predictive_df$dominant_topic)  # Ensure it's a factor
+
+filtered_df <- predictive_df %>%
+  filter(track_popularity > 0)
+
+rock_songs <- subset(predictive_df, playlist_genre == "rock") %>% select(-c("playlist_genre"))
+rap_songs <- subset(predictive_df, playlist_genre == "rap") %>% select(-c("playlist_genre"))
+pop_songs <- subset(predictive_df, playlist_genre == "pop") %>% select(-c("playlist_genre"))
+latin_songs <- subset(predictive_df, playlist_genre == "latin") %>% select(-c("playlist_genre"))
+edm_songs <- subset(predictive_df, playlist_genre == "edm") %>% select(-c("playlist_genre"))
+rb_songs <- subset(predictive_df, playlist_genre == "r&b") %>% select(-c("playlist_genre"))
+```
+
+
+```{r}
+set.seed(1234)
+third_quartile <- quantile(rock_songs$track_popularity, 0.75)
+#redefine popularity as above the third quartile
+
+rock_songs <- rock_songs %>%
+  mutate(Popular = ifelse(track_popularity > third_quartile, 1, 0))
+third_quartile <- quantile(rap_songs$track_popularity, 0.75)
+rap_songs <- rap_songs %>%
+  mutate(Popular = ifelse(track_popularity > third_quartile, 1, 0))
+
+third_quartile <- quantile(pop_songs$track_popularity, 0.75)
+pop_songs <- pop_songs %>%
+  mutate(Popular = ifelse(track_popularity > third_quartile, 1, 0))
+
+
+third_quartile <- quantile(latin_songs$track_popularity, 0.75)
+latin_songs <- latin_songs %>%
+  mutate(Popular = ifelse(track_popularity > third_quartile, 1, 0))
+
+third_quartile <- quantile(rb_songs$track_popularity, 0.75)
+rb_songs <- rb_songs %>%
+  mutate(Popular = ifelse(track_popularity > third_quartile, 1, 0))
+
+third_quartile <- quantile(edm_songs$track_popularity, 0.75)
+edm_songs <- edm_songs %>%
+  mutate(Popular = ifelse(track_popularity > third_quartile, 1, 0))
+
+```
+
+
+
+### Logistic Regression
+
+```{r}
+split = createDataPartition(rock_songs$Popular, p = 0.7, list = FALSE)
+rock.train = rock_songs[split,]
+rock.test = rock_songs[-split,]
+colnames(rock.train)
+split = createDataPartition(rap_songs$Popular, p = 0.7, list = FALSE)
+rap.train = rap_songs[split,]
+rap.test = rap_songs[-split,]
+
+split = createDataPartition(pop_songs$Popular, p = 0.7, list = FALSE)
+pop.train = pop_songs[split,]
+pop.test = pop_songs[-split,]
+
+
+split = createDataPartition(latin_songs$Popular, p = 0.7, list = FALSE)
+latin.train = latin_songs[split,]
+latin.test = latin_songs[-split,]
+
+split = createDataPartition(edm_songs$Popular, p = 0.7, list = FALSE)
+edm.train = edm_songs[split,]
+edm.test = edm_songs[-split,]
+
+
+split = createDataPartition(rb_songs$Popular, p = 0.7, list = FALSE)
+rb.train = rb_songs[split,]
+rb.test = rb_songs[-split,]
+
+```
+#### Rock
+- We tried various combinations of predictors. It seemed for sentiment, SentimentClass_Bing was a better predictor than SentimentClass_nrc
+
+```{r}
+rockmod_logistic <- glm(Popular ~ tempo + instrumentalness +  energy + dominant_topic + SentimentClass_Bing,
+             data = rock.train, family = binomial())
+summary(rockmod_logistic)
+```
+
+
+```{r}
+rock.pred <- predict(rockmod_logistic, newdata = rock.test, type = "response")
+auc_rock <- roc(rock.test$Popular, rock.pred)
+plot(auc_rock)
+```
+```{r}
+print(auc_rock)
+```
+
+#### Rap
+
+```{r}
+rapmod_logistic <- glm(Popular ~ speechiness + tempo + instrumentalness +  energy + dominant_topic + SentimentClass_Bing,
+             data = rap.train, family = binomial())
+summary(rapmod_logistic)
+```
+```{r}
+rap.pred <- predict(rapmod_logistic, newdata = rap.test, type = "response")
+auc_rap <- roc(rap.test$Popular, rap.pred)
+plot(auc_rap)
+```
+
+```{r}
+print(auc_rap)
+```
+
+### CART
+
+#### Rock
+```{r}
+loss.matrix <- cbind(c(0, 1, 2, 0))
+
+hyper_grid <- expand.grid(
+  cp = seq(0.01, 0.1, by = 0.01)
+)
+train_control <- trainControl(method = "cv", number = 10)
+model_rock_cart <- train(Popular ~  energy  + loudness  +
+               instrumentalness + SentimentClass_Bing + dominant_topic,
+               data = rock.train,
+               method = "rpart",
+               parms = list(loss = loss.matrix),
+               trControl = train_control,
+               tuneGrid = hyper_grid)
+
+pred <- predict(model_rock_cart,
+                newdata=rock.test,
+                type="prob")
+rock.test$Popular <- factor(rock.test$Popular, levels = c("0", "1"))
+auc_value <- roc(response = rock.test$Popular, predictor = pred[, 2])$auc
+
+# Print the AUC
+print(auc_value)
+```
+
+#### Rap
+
+```{r}
+loss.matrix <- cbind(c(0, 1, 2, 0))
+
+hyper_grid <- expand.grid(
+  cp = seq(0.01, 0.1, by = 0.01)
+)
+train_control <- trainControl(method = "cv", number = 10)
+rap.train$Popular <- factor(rap.train$Popular, levels = c("0", "1"))
+rap.test$Popular <- factor(rap.test$Popular, levels = c("0", "1"))
+model_rap_cart <- train(Popular ~  energy  + loudness  +
+               instrumentalness + SentimentClass_Bing + dominant_topic,
+               data = rap.train,
+               method = "rpart",
+               parms = list(loss = loss.matrix),
+               trControl = train_control,
+               tuneGrid = hyper_grid)
+
+pred <- predict(model_rap_cart,
+                newdata=rap.test,
+                type="prob")
+auc_value <- roc(response = rap.test$Popular, predictor = pred[, 2])$auc
+
+# Print the AUC
+print(auc_value)
+```
+
+### Random Forest
+
+#### Rock
+```{r}
+train.rf.cv <- train(rock.train %>% select(-c(Popular, track_popularity, track_album_release_date, month, year, day_of_week)),
+                                 rock.train$Popular,
+                                 method="rf",
+                                 tuneGrid=data.frame(mtry=1:10),
+                                 trControl=trainControl(method="cv", number=10))
+```
+
+
+```{r}
+prob_predictions <- predict(train.rf.cv, newdata = rock.test, type = "prob")
+positive_probs <- prob_predictions[, 2]
+roc_obj <- roc(y.test, positive_probs)
+auc_value <- auc(roc_obj)
+print(auc_value)
+```
+
+```{r}
+varImp(train.rf.cv, scale = FALSE)
+```
+
+#### Rap
+
+```{r}
+train.rf.cv <- train(rap.train %>% select(-c(Popular, track_popularity, track_album_release_date, month, year, day_of_week)),
+                                 rap.train$Popular,
+                                 method="rf",
+                                 tuneGrid=data.frame(mtry=1:10),
+                                 trControl=trainControl(method="cv", number=10))
+```
+
+
+```{r}
+prob_predictions <- predict(train.rf.cv, newdata = rap.test, type = "prob")
+positive_probs <- prob_predictions[, 2]
+roc_obj <- roc(rap.test$Popular, positive_probs)
+auc_value <- auc(roc_obj)
+print(auc_value)
+```
+
+
+### XGBoost
+
+#### Rock
+
+```{r}
+X.train = pop.train%>%select(-c(Popular, track_popularity, track_album_release_date, month, year, day_of_week))
+X.test = pop.test%>%select(-c(Popular, track_popularity, track_album_release_date, month, year, day_of_week))
+y.train = pop.train$Popular
+y.test = pop.test$Popular
+X.train <- model.matrix(~.-1,data = X.train)
+X.test <- model.matrix(~.-1,data = X.test)
+```
+
+```{r}
+hyper_grid <- expand.grid(
+  nrounds = c(50,  150),
+  eta = c(0.01, 0.1),
+  max_depth = c(3, 9),
+  subsample = c(0.5,  1),
+  colsample_bytree = c(0.5,  1),
+  gamma = c(0, 0.1, 1, 5),
+  min_child_weight = c(1, 2, 10)
+)
+train_control <- trainControl(method = "cv", number = 10, summaryFunction = twoClassSummary, classProbs = TRUE)
+suppressWarnings({
+xgb_mod <- train(
+  x = X.train, y = factor(y.train, levels = c("0", "1"), labels = c("Class0", "Class1")),
+  method = "xgbTree",
+  trControl = train_control,
+  tuneGrid = hyper_grid,
+  metric = "LogLoss", verbose = FALSE
+)})
+```
+
+```{r}
+prob_predictions <- predict(xgb_mod, newdata = X.test, type = "prob")
+positive_probs <- prob_predictions[, 2]
+roc_obj <- roc(y.test, positive_probs)
+auc_value <- auc(roc_obj)
+print(auc_value)
+```
+
+```{r}
+varImp(xgb_mod, scale = FALSE)
+```
+
+#### Rap
+
+```{r}
+X.train = latin.train%>%select(-c(Popular, track_popularity, track_album_release_date, month, year, day_of_week))
+X.test = latin.test%>%select(-c(Popular, track_popularity, track_album_release_date, month, year, day_of_week))
+y.train = latin.train$Popular
+y.test = latin.test$Popular
+X.train <- model.matrix(~.-1,data = X.train)
+X.test <- model.matrix(~.-1,data = X.test)
+```
+
+```{r}
+hyper_grid <- expand.grid(
+  nrounds = c(50,  150),
+  eta = c(0.01, 0.1),
+  max_depth = c(3, 9),
+  subsample = c(0.5,  1),
+  colsample_bytree = c(0.5,  1),
+  gamma = c(0, 0.1, 1, 5),
+  min_child_weight = c(1, 2, 10)
+)
+train_control <- trainControl(method = "cv", number = 10, summaryFunction = twoClassSummary, classProbs = TRUE)
+suppressWarnings({
+xgb_mod <- train(
+  x = X.train, y = factor(y.train, levels = c("0", "1"), labels = c("Class0", "Class1")),
+  method = "xgbTree",
+  trControl = train_control,
+  tuneGrid = hyper_grid,
+  metric = "LogLoss", verbose = FALSE
+)})
+```
+
+```{r}
+prob_predictions <- predict(xgb_mod, newdata = X.test, type = "prob")
+positive_probs <- prob_predictions[, 2]
+roc_obj <- roc(y.test, positive_probs)
+auc_value <- auc(roc_obj)
+print(auc_value)
+```
+
+```{r}
+varImp(xgb_mod, scale = FALSE)
+```
+
+
+
+### TABLE
+```{r}
+# Sample AUC values for demonstration
+# Replace these with your actual values
+auc_values_rap <- c(0.6847
+, 0.50, 0.8049, 0.8357) # Logistic Regression, CART, Random Forest, XGB for Rap
+auc_values_rock <- c(0.5876, 0.5, .5846, 0.6487) # Logistic Regression, CART, Random Forest, XGB for Rock
+
+# Creating a data frame
+models <- c("Logistic Regression", "CART", "Random Forest", "XGB")
+auc_table <- data.frame(Model = models, 
+                        Rap = auc_values_rap, 
+                        Rock = auc_values_rock)
+
+# Print the table
+print(auc_table)
+```
+
+Rock Logistic Predictors: tempo + instrumentalness +  energy + dominant_topic + SentimentClass_Bing
+
+Rap Logistic Predicors:  speechiness + tempo + instrumentalness +  energy + dominant_topic + SentimentClass_Bing
+
+Rock CART PRedictors: energy  + loudness  + instrumentalness + SentimentClass_Bing + dominant_topic,
+
+Rap CART Predictors:  energy  + loudness  + instrumentalness + SentimentClass_Bing + dominant_topic
+
+RF and XGB, all Predictors
